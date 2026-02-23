@@ -25,11 +25,10 @@ const client = new line.Client(config);
 const app = express();
 const doc = new GoogleSpreadsheet(SPREADSHEET_ID, serviceAccountAuth);
 
-// --- ส่วนที่เพิ่มใหม่: สำหรับให้ Cron-job.org เรียกมาปลุกบอท ---
+// แก้ไขตรงนี้: ตอบกลับสั้นๆ เพื่อไม่ให้ Cron-job ฟ้องว่า Output too large
 app.get("/", (req, res) => {
-  res.send("🚀 บอทตื่นอยู่ครับ! (Wake up signal received)");
+  res.status(200).send("OK");
 });
-// ---------------------------------------------------
 
 async function saveNewMember(userId, displayName, groupId) {
   try {
@@ -43,9 +42,8 @@ async function saveNewMember(userId, displayName, groupId) {
       Status: "Active",
       "Group ID": groupId,
     });
-    console.log(`✅ บันทึกสำเร็จ: ${displayName}`);
   } catch (err) {
-    console.error("❌ Save Error:", err.message);
+    console.error("❌ Sheet Error:", err.message);
   }
 }
 
@@ -60,55 +58,45 @@ cron.schedule("0 9 * * *", async () => {
         const joinDate = moment(row.get("Join Date"));
         const daysDiff = today.diff(joinDate, "days");
         const uId = row.get("User ID");
-        const uName = row.get("Display Name");
         if (daysDiff >= 27 && daysDiff < 30) {
-          const remainDays = 30 - daysDiff;
-          await client.pushMessage(uId, {
-            type: "text",
-            text: `📢 แจ้งเตือนคุณ ${uName} อีก ${remainDays} วันจะหมดอายุสมาชิกค่ะ`,
-          });
+          await client
+            .pushMessage(uId, {
+              type: "text",
+              text: `📢 แจ้งเตือน: อีก ${30 - daysDiff} วันจะหมดอายุสมาชิกค่ะ`,
+            })
+            .catch((e) => {});
         }
         if (daysDiff >= 30) {
-          await client.pushMessage(uId, {
-            type: "text",
-            text: `🚫 หมดอายุสมาชิกแล้วค่ะคุณ ${uName}`,
-          });
-          await client.pushMessage(ADMIN_LINE_ID, {
-            type: "text",
-            text: `🚨 [หมดอายุ] ${uName} (ID: ${uId})`,
-          });
+          await client
+            .pushMessage(uId, { type: "text", text: `🚫 หมดอายุสมาชิกแล้วค่ะ` })
+            .catch((e) => {});
+          await client
+            .pushMessage(ADMIN_LINE_ID, {
+              type: "text",
+              text: `🚨 [หมดอายุ] ${row.get("Display Name")}`,
+            })
+            .catch((e) => {});
           await row.delete();
         }
       }
     }
   } catch (err) {
-    console.error("Cron Error:", err);
+    console.error("Cron Error");
   }
 });
 
 app.post("/webhook", line.middleware(config), (req, res) => {
-  Promise.all(req.body.events.map(handleEvent)).then((result) =>
-    res.json(result),
-  );
+  Promise.all(req.body.events.map(handleEvent))
+    .then((result) => res.json(result))
+    .catch((err) => {
+      console.error("Webhook Error");
+      res.status(500).end();
+    });
 });
 
 async function handleEvent(event) {
   const userId = event.source.userId;
   const groupId = event.source.groupId;
-
-  await doc.loadInfo();
-  const sheet = doc.sheetsByIndex[0];
-  await sheet.loadCells("F1:J1");
-
-  const imgLink1 = sheet.getCellByA1("F1").value || "";
-  const imgLink2 = sheet.getCellByA1("G1").value || "";
-  const welcomeText =
-    sheet.getCellByA1("H1").value || "ยินดีต้อนรับเข้าสู่กลุ่มค่ะ";
-  const paymentText =
-    sheet.getCellByA1("I1").value ||
-    "กรุณารอแอดมินแจ้งรายละเอียดการชำระเงินค่ะ";
-  const contactText =
-    sheet.getCellByA1("J1").value || "กรุณารอแอดมินตอบกลับนะคะ";
 
   if (event.type === "memberJoined") {
     for (let member of event.joined.members) {
@@ -119,70 +107,79 @@ async function handleEvent(event) {
         );
         await saveNewMember(member.userId, profile.displayName, groupId);
 
+        await doc.loadInfo();
+        const sheet = doc.sheetsByIndex[0];
+        await sheet.loadCells("F1:J1");
+
+        const img1 = sheet.getCellByA1("F1").value;
+        const img2 = sheet.getCellByA1("G1").value;
+        const welTxt = sheet.getCellByA1("H1").value || "ยินดีต้อนรับค่ะ";
+
         const messages = [];
-        if (imgLink1.toString().startsWith("http")) {
+        // ตรวจสอบลิงก์รูปให้ชัวร์ก่อนส่ง
+        if (img1 && img1.toString().startsWith("https")) {
           messages.push({
             type: "image",
-            originalContentUrl: imgLink1,
-            previewImageUrl: imgLink1,
+            originalContentUrl: img1.toString().trim(),
+            previewImageUrl: img1.toString().trim(),
           });
         }
-        if (imgLink2.toString().startsWith("http")) {
+        if (img2 && img2.toString().startsWith("https")) {
           messages.push({
             type: "image",
-            originalContentUrl: imgLink2,
-            previewImageUrl: imgLink2,
+            originalContentUrl: img2.toString().trim(),
+            previewImageUrl: img2.toString().trim(),
           });
         }
         messages.push({
           type: "text",
-          text: `สวัสดีคุณ ${profile.displayName} ${welcomeText}`,
+          text: `สวัสดีคุณ ${profile.displayName} ${welTxt}`,
         });
 
         await client.replyMessage(event.replyToken, messages);
       } catch (err) {
-        console.error(err);
+        console.error("❌ Send Join Msg Error: ลิงก์รูปภาพใน Sheet อาจจะผิด");
       }
     }
   }
 
   if (event.type === "message" && event.message.type === "text") {
     const userMsg = event.message.text;
+    await doc.loadInfo();
+    const sheet = doc.sheetsByIndex[0];
+    await sheet.loadCells("I1:J1");
 
     if (userMsg === "สนใจ" || userMsg === "ช่องทางชำระเงิน") {
+      const payTxt = sheet.getCellByA1("I1").value || "รอแอดมินแจ้งนะคะ";
       await client.replyMessage(event.replyToken, {
         type: "text",
-        text: paymentText,
+        text: payTxt,
       });
     } else if (userMsg === "ติดต่อแอดมิด") {
+      const conTxt = sheet.getCellByA1("J1").value || "รอสักครู่นะคะ";
       await client.replyMessage(event.replyToken, {
         type: "text",
-        text: contactText,
+        text: conTxt,
       });
     } else {
       if (userId === ADMIN_LINE_ID) return null;
+      const conTxt = sheet.getCellByA1("J1").value || "รอสักครู่นะคะ";
+      await client.replyMessage(event.replyToken, {
+        type: "text",
+        text: conTxt,
+      });
 
       let name = "สมาชิก";
       try {
-        if (groupId) {
-          const p = await client.getGroupMemberProfile(groupId, userId);
-          name = p.displayName;
-        } else {
-          const p = await client.getProfile(userId);
-          name = p.displayName;
-        }
-      } catch (e) {
-        console.log("ดึงชื่อไม่ได้:", e.message);
-      }
-
-      await client.replyMessage(event.replyToken, {
-        type: "text",
-        text: contactText,
-      });
+        const p = groupId
+          ? await client.getGroupMemberProfile(groupId, userId)
+          : await client.getProfile(userId);
+        name = p.displayName;
+      } catch (e) {}
 
       await client.pushMessage(ADMIN_LINE_ID, {
         type: "text",
-        text: `📢 มีคนทักจากกลุ่ม!\n👤 ชื่อ: ${name}\n💬: ${userMsg}`,
+        text: `📢 มีคนทัก!\n👤 ชื่อ: ${name}\n💬: ${userMsg}`,
       });
     }
   }
