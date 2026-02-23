@@ -6,8 +6,8 @@ const moment = require("moment");
 const cron = require("node-cron");
 
 const config = {
-  channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
-  channelSecret: process.env.CHANNEL_SECRET,
+  channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN || "",
+  channelSecret: process.env.CHANNEL_SECRET || "",
 };
 
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
@@ -25,7 +25,7 @@ const client = new line.Client(config);
 const app = express();
 const doc = new GoogleSpreadsheet(SPREADSHEET_ID, serviceAccountAuth);
 
-// แก้ไขตรงนี้: ตอบกลับสั้นๆ เพื่อไม่ให้ Cron-job ฟ้องว่า Output too large
+// สำหรับปลุกบอท (Cron-job.org)
 app.get("/", (req, res) => {
   res.status(200).send("OK");
 });
@@ -34,19 +34,19 @@ async function saveNewMember(userId, displayName, groupId) {
   try {
     await doc.loadInfo();
     const sheet = doc.sheetsByIndex[0];
-    const joinDate = moment().format("YYYY-MM-DD");
     await sheet.addRow({
       "User ID": userId,
       "Display Name": displayName,
-      "Join Date": joinDate,
+      "Join Date": moment().format("YYYY-MM-DD"),
       Status: "Active",
-      "Group ID": groupId,
+      "Group ID": groupId || "Direct Message",
     });
   } catch (err) {
-    console.error("❌ Sheet Error:", err.message);
+    console.error("❌ Sheet Save Error:", err.message);
   }
 }
 
+// ระบบตรวจสอบอายุสมาชิก (รันทุก 9 โมงเช้า)
 cron.schedule("0 9 * * *", async () => {
   try {
     await doc.loadInfo();
@@ -55,57 +55,74 @@ cron.schedule("0 9 * * *", async () => {
     const today = moment();
     for (let row of rows) {
       if (row.get("Status") === "Active") {
-        const joinDate = moment(row.get("Join Date"));
+        const joinDateStr = row.get("Join Date");
+        if (!joinDateStr) continue;
+
+        const joinDate = moment(joinDateStr);
         const daysDiff = today.diff(joinDate, "days");
         const uId = row.get("User ID");
+
         if (daysDiff >= 27 && daysDiff < 30) {
           await client
             .pushMessage(uId, {
               type: "text",
               text: `📢 แจ้งเตือน: อีก ${30 - daysDiff} วันจะหมดอายุสมาชิกค่ะ`,
             })
-            .catch((e) => {});
-        }
-        if (daysDiff >= 30) {
+            .catch(() => {});
+        } else if (daysDiff >= 30) {
           await client
             .pushMessage(uId, { type: "text", text: `🚫 หมดอายุสมาชิกแล้วค่ะ` })
-            .catch((e) => {});
-          await client
-            .pushMessage(ADMIN_LINE_ID, {
-              type: "text",
-              text: `🚨 [หมดอายุ] ${row.get("Display Name")}`,
-            })
-            .catch((e) => {});
+            .catch(() => {});
+          if (ADMIN_LINE_ID) {
+            await client
+              .pushMessage(ADMIN_LINE_ID, {
+                type: "text",
+                text: `🚨 [หมดอายุ] ${row.get("Display Name")} (${uId})`,
+              })
+              .catch(() => {});
+          }
           await row.delete();
         }
       }
     }
   } catch (err) {
-    console.error("Cron Error");
+    console.error("Cron Process Error");
   }
 });
 
+// Webhook Endpoint
 app.post("/webhook", line.middleware(config), (req, res) => {
   Promise.all(req.body.events.map(handleEvent))
     .then((result) => res.json(result))
     .catch((err) => {
-      console.error("Webhook Error");
+      console.error("Webhook Middleware Error");
       res.status(500).end();
     });
 });
 
 async function handleEvent(event) {
+  // ป้องกัน Error หาก event ไม่มี source หรือ userId (เช่นตอนโดนยิงด้วย Postman แบบผิดๆ)
+  if (!event.source || !event.source.userId) return null;
+
   const userId = event.source.userId;
   const groupId = event.source.groupId;
 
+  // 1. กรณีคนเข้ากลุ่ม
   if (event.type === "memberJoined") {
     for (let member of event.joined.members) {
       try {
-        const profile = await client.getGroupMemberProfile(
-          groupId,
-          member.userId,
-        );
-        await saveNewMember(member.userId, profile.displayName, groupId);
+        let displayName = "สมาชิกใหม่";
+        try {
+          const profile = await client.getGroupMemberProfile(
+            groupId,
+            member.userId,
+          );
+          displayName = profile.displayName;
+        } catch (e) {
+          console.log("ดึงโปรไฟล์ไม่ได้ (อาจเป็น Verify Signal)");
+        }
+
+        await saveNewMember(member.userId, displayName, groupId);
 
         await doc.loadInfo();
         const sheet = doc.sheetsByIndex[0];
@@ -116,7 +133,6 @@ async function handleEvent(event) {
         const welTxt = sheet.getCellByA1("H1").value || "ยินดีต้อนรับค่ะ";
 
         const messages = [];
-        // ตรวจสอบลิงก์รูปให้ชัวร์ก่อนส่ง
         if (img1 && img1.toString().startsWith("https")) {
           messages.push({
             type: "image",
@@ -133,59 +149,69 @@ async function handleEvent(event) {
         }
         messages.push({
           type: "text",
-          text: `สวัสดีคุณ ${profile.displayName} ${welTxt}`,
+          text: `สวัสดีคุณ ${displayName} ${welTxt}`,
         });
 
-        await client.replyMessage(event.replyToken, messages);
+        await client
+          .replyMessage(event.replyToken, messages)
+          .catch((e) => console.log("Reply Fail"));
       } catch (err) {
-        console.error("❌ Send Join Msg Error: ลิงก์รูปภาพใน Sheet อาจจะผิด");
+        console.error("MemberJoined Process Error");
       }
     }
   }
 
+  // 2. กรณีส่งข้อความ
   if (event.type === "message" && event.message.type === "text") {
     const userMsg = event.message.text;
-    await doc.loadInfo();
-    const sheet = doc.sheetsByIndex[0];
-    await sheet.loadCells("I1:J1");
+    try {
+      await doc.loadInfo();
+      const sheet = doc.sheetsByIndex[0];
+      await sheet.loadCells("I1:J1");
 
-    if (userMsg === "สนใจ" || userMsg === "ช่องทางชำระเงิน") {
       const payTxt = sheet.getCellByA1("I1").value || "รอแอดมินแจ้งนะคะ";
-      await client.replyMessage(event.replyToken, {
-        type: "text",
-        text: payTxt,
-      });
-    } else if (userMsg === "ติดต่อแอดมิด") {
       const conTxt = sheet.getCellByA1("J1").value || "รอสักครู่นะคะ";
-      await client.replyMessage(event.replyToken, {
-        type: "text",
-        text: conTxt,
-      });
-    } else {
-      if (userId === ADMIN_LINE_ID) return null;
-      const conTxt = sheet.getCellByA1("J1").value || "รอสักครู่นะคะ";
-      await client.replyMessage(event.replyToken, {
-        type: "text",
-        text: conTxt,
-      });
 
-      let name = "สมาชิก";
-      try {
-        const p = groupId
-          ? await client.getGroupMemberProfile(groupId, userId)
-          : await client.getProfile(userId);
-        name = p.displayName;
-      } catch (e) {}
+      if (userMsg === "สนใจ" || userMsg === "ช่องทางชำระเงิน") {
+        await client
+          .replyMessage(event.replyToken, { type: "text", text: payTxt })
+          .catch(() => {});
+      } else if (userMsg === "ติดต่อแอดมิด") {
+        await client
+          .replyMessage(event.replyToken, { type: "text", text: conTxt })
+          .catch(() => {});
+      } else {
+        // แจ้งเตือนแอดมิน (ยกเว้นแอดมินพิมพ์เอง)
+        if (userId !== ADMIN_LINE_ID) {
+          await client
+            .replyMessage(event.replyToken, { type: "text", text: conTxt })
+            .catch(() => {});
 
-      await client.pushMessage(ADMIN_LINE_ID, {
-        type: "text",
-        text: `📢 มีคนทัก!\n👤 ชื่อ: ${name}\n💬: ${userMsg}`,
-      });
+          let name = "สมาชิก";
+          try {
+            const p = groupId
+              ? await client.getGroupMemberProfile(groupId, userId)
+              : await client.getProfile(userId);
+            name = p.displayName;
+          } catch (e) {}
+
+          if (ADMIN_LINE_ID) {
+            await client
+              .pushMessage(ADMIN_LINE_ID, {
+                type: "text",
+                text: `📢 มีคนทัก!\n👤 ชื่อ: ${name}\n💬: ${userMsg}`,
+              })
+              .catch(() => {});
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Message Processing Error");
     }
   }
 }
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000; // ปรับให้ตรงกับที่ Render ชอบตรวจเจอ
 app.listen(PORT, () => {
   console.log(`🚀 ระบบพร้อมทำงานที่พอร์ต ${PORT}`);
 });
