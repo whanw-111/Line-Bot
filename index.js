@@ -90,14 +90,10 @@ cron.schedule("0 9 * * *", async () => {
   }
 });
 
-// Webhook Endpoint
-app.post("/webhook", line.middleware(config), (req, res) => {
-  Promise.all(req.body.events.map(handleEvent))
-    .then((result) => res.json(result))
-    .catch((err) => {
-      console.error("Webhook Middleware Error");
-      res.status(500).end();
-    });
+// ใช้ express.json() แทน middleware ของ LINE ชั่วคราวเพื่อเทส Postman
+app.post("/webhook", express.json(), (req, res) => {
+  handleEvent(req.body.events[0]);
+  res.status(200).send("OK");
 });
 
 async function handleEvent(event) {
