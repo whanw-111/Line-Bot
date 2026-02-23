@@ -46,7 +46,7 @@ async function saveNewMember(userId, displayName, groupId) {
   }
 }
 
-// ระบบตรวจสอบอายุสมาชิก (รันทุก 9 โมงเช้า)
+// ระบบตรวจสอบอายุสมาชิก (9:00 AM)
 cron.schedule("0 9 * * *", async () => {
   try {
     await doc.loadInfo();
@@ -86,18 +86,21 @@ cron.schedule("0 9 * * *", async () => {
       }
     }
   } catch (err) {
-    console.error("Cron Process Error");
+    console.error("Cron Error");
   }
 });
 
-// ใช้ express.json() แทน middleware ของ LINE ชั่วคราวเพื่อเทส Postman
-app.post("/webhook", express.json(), (req, res) => {
-  handleEvent(req.body.events[0]);
-  res.status(200).send("OK");
+// ✅ นำ Middleware กลับมาใส่เพื่อความปลอดภัย (ห้ามลบ)
+app.post("/webhook", line.middleware(config), (req, res) => {
+  Promise.all(req.body.events.map(handleEvent))
+    .then((result) => res.json(result))
+    .catch((err) => {
+      console.error("Webhook Middleware Error");
+      res.status(500).end();
+    });
 });
 
 async function handleEvent(event) {
-  // ป้องกัน Error หาก event ไม่มี source หรือ userId (เช่นตอนโดนยิงด้วย Postman แบบผิดๆ)
   if (!event.source || !event.source.userId) return null;
 
   const userId = event.source.userId;
@@ -115,7 +118,7 @@ async function handleEvent(event) {
           );
           displayName = profile.displayName;
         } catch (e) {
-          console.log("ดึงโปรไฟล์ไม่ได้ (อาจเป็น Verify Signal)");
+          console.log("Profile Fetch Fail");
         }
 
         await saveNewMember(member.userId, displayName, groupId);
@@ -148,11 +151,9 @@ async function handleEvent(event) {
           text: `สวัสดีคุณ ${displayName} ${welTxt}`,
         });
 
-        await client
-          .replyMessage(event.replyToken, messages)
-          .catch((e) => console.log("Reply Fail"));
+        await client.replyMessage(event.replyToken, messages).catch(() => {});
       } catch (err) {
-        console.error("MemberJoined Process Error");
+        console.error("Joined Event Error");
       }
     }
   }
@@ -177,28 +178,26 @@ async function handleEvent(event) {
           .replyMessage(event.replyToken, { type: "text", text: conTxt })
           .catch(() => {});
       } else {
-        // แจ้งเตือนแอดมิน (ยกเว้นแอดมินพิมพ์เอง)
-        if (userId !== ADMIN_LINE_ID) {
+        if (userId === ADMIN_LINE_ID) return null;
+        await client
+          .replyMessage(event.replyToken, { type: "text", text: conTxt })
+          .catch(() => {});
+
+        let name = "สมาชิก";
+        try {
+          const p = groupId
+            ? await client.getGroupMemberProfile(groupId, userId)
+            : await client.getProfile(userId);
+          name = p.displayName;
+        } catch (e) {}
+
+        if (ADMIN_LINE_ID) {
           await client
-            .replyMessage(event.replyToken, { type: "text", text: conTxt })
+            .pushMessage(ADMIN_LINE_ID, {
+              type: "text",
+              text: `📢 มีคนทัก!\n👤 ชื่อ: ${name}\n💬: ${userMsg}`,
+            })
             .catch(() => {});
-
-          let name = "สมาชิก";
-          try {
-            const p = groupId
-              ? await client.getGroupMemberProfile(groupId, userId)
-              : await client.getProfile(userId);
-            name = p.displayName;
-          } catch (e) {}
-
-          if (ADMIN_LINE_ID) {
-            await client
-              .pushMessage(ADMIN_LINE_ID, {
-                type: "text",
-                text: `📢 มีคนทัก!\n👤 ชื่อ: ${name}\n💬: ${userMsg}`,
-              })
-              .catch(() => {});
-          }
         }
       }
     } catch (err) {
@@ -207,7 +206,7 @@ async function handleEvent(event) {
   }
 }
 
-const PORT = process.env.PORT || 10000; // ปรับให้ตรงกับที่ Render ชอบตรวจเจอ
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 ระบบพร้อมทำงานที่พอร์ต ${PORT}`);
 });
