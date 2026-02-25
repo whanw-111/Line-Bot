@@ -105,6 +105,7 @@ async function handleEvent(event) {
 
   const userId = event.source.userId;
   const groupId = event.source.groupId;
+  const isGroup = !!groupId; // ตรวจสอบว่าเป็นกลุ่มหรือไม่
 
   // 1. กรณีคนเข้ากลุ่ม
   if (event.type === "memberJoined") {
@@ -125,7 +126,8 @@ async function handleEvent(event) {
 
         await doc.loadInfo();
         const sheet = doc.sheetsByIndex[0];
-        await sheet.loadCells("F1:J1");
+        // ✅ แก้ไข: โหลดตั้งแต่ A1 ถึง K1 เพื่อให้ระบบสมาชิก (A-E) และรูป (F-G) ทำงานได้ครบ
+        await sheet.loadCells("A1:K1");
 
         const img1 = sheet.getCellByA1("F1").value;
         const img2 = sheet.getCellByA1("G1").value;
@@ -164,25 +166,39 @@ async function handleEvent(event) {
     try {
       await doc.loadInfo();
       const sheet = doc.sheetsByIndex[0];
-      await sheet.loadCells("I1:J1");
+      // ✅ แก้ไข: โหลดตั้งแต่ A1 ถึง K1 เพื่อครอบคลุมทั้งระบบสมาชิกและข้อความตอบกลับ
+      await sheet.loadCells("A1:K1");
 
       const payTxt = sheet.getCellByA1("I1").value || "รอแอดมินแจ้งนะคะ";
       const conTxt = sheet.getCellByA1("J1").value || "รอสักครู่นะคะ";
+      const groupRes = sheet.getCellByA1("K1").value || "ทักแอดมินไวกว่านะคะพี่ 🙏";
 
-      if (userMsg === "สนใจ" || userMsg === "ช่องทางชำระเงิน") {
-        await client
-          .replyMessage(event.replyToken, { type: "text", text: payTxt })
-          .catch(() => {});
-      } else if (userMsg === "ติดต่อแอดมิด") {
-        await client
-          .replyMessage(event.replyToken, { type: "text", text: conTxt })
-          .catch(() => {});
+      if (isGroup) {
+        // --- กรณีพิมพ์ในกลุ่ม ---
+        if (userId !== ADMIN_LINE_ID) {
+          // ตอบกลับด้วยข้อความในช่อง K1 เสมอเพื่อให้ทักแชทส่วนตัว
+          await client.replyMessage(event.replyToken, { type: "text", text: groupRes.toString() }).catch(() => {});
+        }
       } else {
-        if (userId === ADMIN_LINE_ID) return null;
-        await client
-          .replyMessage(event.replyToken, { type: "text", text: conTxt })
-          .catch(() => {});
+        // --- กรณีพิมพ์ใน LINE OA (แชทส่วนตัว) ---
+        if (userMsg === "สนใจ" || userMsg === "ช่องทางชำระเงิน") {
+          await client
+            .replyMessage(event.replyToken, { type: "text", text: payTxt.toString() })
+            .catch(() => {});
+        } else if (userMsg === "ติดต่อแอดมิด") {
+          await client
+            .replyMessage(event.replyToken, { type: "text", text: conTxt.toString() })
+            .catch(() => {});
+        } else {
+          if (userId === ADMIN_LINE_ID) return null;
+          await client
+            .replyMessage(event.replyToken, { type: "text", text: conTxt.toString() })
+            .catch(() => {});
+        }
+      }
 
+      // ส่วนแจ้งเตือนแอดมิน (เก็บไว้ครบถ้วน)
+      if (userId !== ADMIN_LINE_ID && ADMIN_LINE_ID) {
         let name = "สมาชิก";
         try {
           const p = groupId
@@ -195,7 +211,7 @@ async function handleEvent(event) {
           await client
             .pushMessage(ADMIN_LINE_ID, {
               type: "text",
-              text: `📢 มีคนทัก!\n👤 ชื่อ: ${name}\n💬: ${userMsg}`,
+              text: `📢 มีคนทัก (${isGroup ? 'ในกลุ่ม' : 'ส่วนตัว'})\n👤 ชื่อ: ${name}\n💬: ${userMsg}`,
             })
             .catch(() => {});
         }
