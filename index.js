@@ -147,10 +147,13 @@ async function handleEvent(event) {
         }
       } else {
         // --- กรณีพิมพ์ใน LINE OA (แชทส่วนตัว) ---
-        if (userMsg === "สนใจ" || userMsg === "ช่องทางชำระเงิน") {
+        const cleanMsg = userMsg.trim(); 
+
+        if (cleanMsg === "สนใจ" || cleanMsg === "ช่องทางชำระเงิน") {
+          // ถ้าเจอคำว่า สนใจ หรือ ช่องทางชำระเงิน ให้ส่งข้อความชำระเงิน (payTxt)
           await client.replyMessage(event.replyToken, { type: "text", text: payTxt }).catch(() => {});
         } else {
-          // พิมพ์อย่างอื่นใน OA ให้ส่งข้อความแจ้งติดต่อแอดมิน (J1)
+          // ถ้าไม่ใช่สองคำนี้ ให้ส่งข้อความติดต่อแอดมิน (conTxt)
           await client.replyMessage(event.replyToken, { type: "text", text: conTxt }).catch(() => {});
         }
       }
