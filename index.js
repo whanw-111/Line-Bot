@@ -25,28 +25,27 @@ const client = new line.Client(config);
 const app = express();
 const doc = new GoogleSpreadsheet(SPREADSHEET_ID, serviceAccountAuth);
 
-app.get("/wake-up", (req, res) => {
-  res.status(200).send("Awake!");
-});
-app.get("/", (req, res) => {
-  res.status(200).send("OK");
-});
+app.get("/wake-up", (req, res) => res.status(200).send("Awake!"));
+app.get("/", (req, res) => res.status(200).send("OK"));
 
-// ฟังก์ชันบันทึกคนเข้า (เพิ่มการตรวจสอบความครบถ้วน)
+// --- ฟังก์ชันเสริม: โหลด Sheet แบบรวดเร็ว ---
+async function getActiveSheet() {
+  await doc.loadInfo();
+  return doc.sheetsByIndex[0];
+}
+
 async function saveNewMember(userId, displayName, groupId) {
   try {
-    await doc.loadInfo();
-    const sheet = doc.sheetsByIndex[0];
+    const sheet = await getActiveSheet();
     const newMember = {
       "User ID": userId || "N/A",
-      "Display Name": displayName || "สมาชิกใหม่ (ไม่ทราบชื่อ)",
+      "Display Name": displayName || "สมาชิกใหม่",
       "Join Date": moment().format("YYYY-MM-DD"),
       Status: "Active",
       "Group ID": groupId || "Direct Message",
     };
     await sheet.addRow(newMember);
 
-    // แจ้งแอดมินว่าบันทึกสำเร็จ
     if (ADMIN_LINE_ID) {
       await client
         .pushMessage(ADMIN_LINE_ID, {
@@ -60,11 +59,9 @@ async function saveNewMember(userId, displayName, groupId) {
   }
 }
 
-// ฟังก์ชันลบคนออก (และแจ้งแอดมิน)
 async function removeMember(userId) {
   try {
-    await doc.loadInfo();
-    const sheet = doc.sheetsByIndex[0];
+    const sheet = await getActiveSheet();
     const rows = await sheet.getRows();
     const targetRow = rows.find((row) => row.get("User ID") === userId);
     if (targetRow) {
@@ -84,11 +81,10 @@ async function removeMember(userId) {
   }
 }
 
-// ระบบตรวจสอบอายุรายวัน
+// ระบบตรวจสอบอายุรายวัน (09:00 น.)
 cron.schedule("0 9 * * *", async () => {
   try {
-    await doc.loadInfo();
-    const sheet = doc.sheetsByIndex[0];
+    const sheet = await getActiveSheet();
     const rows = await sheet.getRows();
     const today = moment();
     for (let row of rows) {
@@ -122,7 +118,7 @@ cron.schedule("0 9 * * *", async () => {
       }
     }
   } catch (err) {
-    console.error("Cron Error");
+    console.error("Cron Error", err);
   }
 });
 
@@ -143,7 +139,6 @@ async function handleEvent(event) {
       try {
         let displayName = "สมาชิกใหม่";
         try {
-          // ดึงชื่อสมาชิก (พยายามดึงหลายวิธีเพื่อให้ข้อมูลครบ)
           const profile = await client.getGroupMemberProfile(
             groupId,
             member.userId,
@@ -158,36 +153,40 @@ async function handleEvent(event) {
 
         await saveNewMember(member.userId, displayName, groupId);
 
-        await doc.loadInfo();
-        const sheet = doc.sheetsByIndex[0];
+        const sheet = await getActiveSheet();
         await sheet.loadCells("A1:K1");
         const img1 = sheet.getCellByA1("F1").value;
         const img2 = sheet.getCellByA1("G1").value;
         const welTxt = sheet.getCellByA1("H1").value || "ยินดีต้อนรับค่ะ";
 
         const messages = [];
-        if (img1 && img1.toString().startsWith("https"))
+        if (img1?.toString().startsWith("https")) {
           messages.push({
             type: "image",
             originalContentUrl: img1.toString().trim(),
             previewImageUrl: img1.toString().trim(),
           });
-        if (img2 && img2.toString().startsWith("https"))
+        }
+        if (img2?.toString().startsWith("https")) {
           messages.push({
             type: "image",
             originalContentUrl: img2.toString().trim(),
             previewImageUrl: img2.toString().trim(),
           });
+        }
         messages.push({
           type: "text",
           text: `สวัสดีคุณ ${displayName} ${welTxt}`,
         });
+
         await client.replyMessage(event.replyToken, messages).catch(() => {});
-      } catch (err) {}
+      } catch (err) {
+        console.error("MemberJoin Error", err);
+      }
     }
   }
 
-  // 2. กรณีคนออก (แจ้งแอดมิน ข้อมูลไม่หายเงียบ)
+  // 2. กรณีคนออก
   if (event.type === "memberLeft") {
     for (let member of event.left.members) {
       await removeMember(member.userId);
@@ -201,8 +200,7 @@ async function handleEvent(event) {
     const userMsg = event.message.text.trim();
 
     try {
-      await doc.loadInfo();
-      const sheet = doc.sheetsByIndex[0];
+      const sheet = await getActiveSheet();
       await sheet.loadCells("A1:K1");
       const payTxt = (sheet.getCellByA1("I1").value || "รอแอดมินแจ้งนะคะ")
         .toString()
@@ -210,20 +208,11 @@ async function handleEvent(event) {
       const conTxt = (sheet.getCellByA1("J1").value || "รอสักครู่นะคะ")
         .toString()
         .trim();
-      const groupRes = (
-        sheet.getCellByA1("K1").value || "ทักแอดมินไวกว่านะคะพี่ 🙏"
-      )
-        .toString()
-        .trim();
 
-      if (isGroup) {
-        if (userId !== ADMIN_LINE_ID) {
-          await client
-            .replyMessage(event.replyToken, { type: "text", text: groupRes })
-            .catch(() => {});
-        }
-      } else {
-        const payKeyword = /สนใจ|ชำระเงิน|จ่ายเงิน|เลขบัญชี/g;
+      if (!isGroup) {
+        // ทำงานเฉพาะแชทส่วนตัว (ไม่ตอบอัตโนมัติในกลุ่มเพื่อลดความรำคาญ)
+        const payKeyword =
+          /สนใจ|ชำระเงิน|จ่ายเงิน|เลขบัญชี|ช่องทางชำระเงิน|ติดต่อแอดมิน/g;
         if (payKeyword.test(userMsg)) {
           await client
             .replyMessage(event.replyToken, { type: "text", text: payTxt })
@@ -235,7 +224,7 @@ async function handleEvent(event) {
         }
       }
 
-      // ส่งแจ้งเตือนแอดมินแบบละเอียด
+      // แจ้งเตือนแอดมิน (ทำงานทั้งในกลุ่มและส่วนตัว)
       if (userId !== ADMIN_LINE_ID && ADMIN_LINE_ID) {
         let name = "ไม่ทราบชื่อ";
         try {
@@ -251,11 +240,11 @@ async function handleEvent(event) {
           })
           .catch(() => {});
       }
-    } catch (err) {}
+    } catch (err) {
+      console.error("Message Error", err);
+    }
   }
 }
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log(`🚀 บอทพร้อมทำงานที่พอร์ต ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 บอทพร้อมทำงานที่พอร์ต ${PORT}`));
