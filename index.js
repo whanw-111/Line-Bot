@@ -25,6 +25,10 @@ const getSheet = async () => {
   return doc.sheetsByIndex[0];
 };
 
+// --- ระบบปลุกบอท (Wake-up) ---
+app.get("/wake-up", (req, res) => res.status(200).send("Awake!"));
+app.get("/", (req, res) => res.status(200).send("OK"));
+
 // --- ฟังก์ชันหลัก ---
 async function saveNewMember(userId, displayName, groupId) {
   try {
@@ -122,7 +126,7 @@ async function handleEvent(event) {
       const messages = [];
       ["F1", "G1"].forEach((cell) => {
         const url = sheet.getCellByA1(cell).value;
-        if (url?.startsWith("http"))
+        if (url?.toString().startsWith("http"))
           messages.push({
             type: "image",
             originalContentUrl: url,
@@ -176,4 +180,5 @@ async function handleEvent(event) {
   }
 }
 
-app.listen(process.env.PORT || 10000);
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`🚀 บอทพร้อมทำงานที่พอร์ต ${PORT}`));
